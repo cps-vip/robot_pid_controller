@@ -1,5 +1,3 @@
-use embassy_stm32::timer::simple_pwm::SimplePwm;
-use embassy_stm32::timer::GeneralInstance4Channel;
 use pid::Pid;
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -24,25 +22,32 @@ impl MotorCommand {
     }
 }
 
-/// H-bridge helper for a `SimplePwm` using CH1 as "forward" and CH2 as "reverse".
-pub struct HBridgePwm<'d, T: GeneralInstance4Channel> {
-    pwm: SimplePwm<'d, T>,
+/// H-bridge driver for Zynq-7000 motor channels.
+///
+/// Uses memory-mapped AXI registers (in the PL) or TTC channels to control
+/// forward and reverse duty cycles.
+pub struct HBridgePwm {
+    ch1_duty_addr: *mut u32,
+    ch2_duty_addr: *mut u32,
     max: u16,
 }
 
-impl<'d, T: GeneralInstance4Channel> HBridgePwm<'d, T> {
-    pub fn new(mut pwm: SimplePwm<'d, T>) -> Self {
-        // Enable both channels once; we’ll still set duty to 0 for coasting.
-        {
-            let mut ch = pwm.ch1();
-            ch.enable();
-        }
-        {
-            let mut ch = pwm.ch2();
-            ch.enable();
-        }
-        let max = pwm.ch1().max_duty_cycle();
-        Self { pwm, max }
+// Safety: The register addresses point to valid memory-mapped hardware peripheral registers.
+unsafe impl Send for HBridgePwm {}
+
+impl HBridgePwm {
+    /// Create an H-bridge driver with forward (ch1) and reverse (ch2) duty register addresses.
+    ///
+    /// # Safety
+    /// The caller must ensure the register addresses are valid MMIO pointers.
+    pub unsafe fn new(ch1_duty_addr: *mut u32, ch2_duty_addr: *mut u32, max_duty: u16) -> Self {
+        let mut dev = Self {
+            ch1_duty_addr,
+            ch2_duty_addr,
+            max: max_duty,
+        };
+        dev.apply(MotorCommand::coast());
+        dev
     }
 
     pub fn max_duty(&self) -> u16 {
@@ -50,33 +55,26 @@ impl<'d, T: GeneralInstance4Channel> HBridgePwm<'d, T> {
     }
 
     pub fn apply(&mut self, cmd: MotorCommand) {
-        match cmd.drive {
-            Drive::Coast => {
-                let mut ch1 = self.pwm.ch1();
-                ch1.set_duty_cycle_fully_off();
-                let mut ch2 = self.pwm.ch2();
-                ch2.set_duty_cycle_fully_off();
-            }
-            Drive::Forward => {
-                let mut ch1 = self.pwm.ch1();
-                ch1.set_duty_cycle(cmd.duty);
-                let mut ch2 = self.pwm.ch2();
-                ch2.set_duty_cycle_fully_off();
-            }
-            Drive::Reverse => {
-                let mut ch1 = self.pwm.ch1();
-                ch1.set_duty_cycle_fully_off();
-                let mut ch2 = self.pwm.ch2();
-                ch2.set_duty_cycle(cmd.duty);
+        unsafe {
+            match cmd.drive {
+                Drive::Coast => {
+                    core::ptr::write_volatile(self.ch1_duty_addr, 0);
+                    core::ptr::write_volatile(self.ch2_duty_addr, 0);
+                }
+                Drive::Forward => {
+                    core::ptr::write_volatile(self.ch1_duty_addr, cmd.duty as u32);
+                    core::ptr::write_volatile(self.ch2_duty_addr, 0);
+                }
+                Drive::Reverse => {
+                    core::ptr::write_volatile(self.ch1_duty_addr, 0);
+                    core::ptr::write_volatile(self.ch2_duty_addr, cmd.duty as u32);
+                }
             }
         }
     }
 }
 
 /// PID-based speed controller producing an H-bridge command.
-///
-/// - `setpoint_cps` and `measured_cps` are in counts per second.
-/// - Output is normalized to [-1, 1] and then mapped to a duty range.
 pub struct MotorPid {
     pid: Pid<f32>,
     min_duty: u16,
@@ -86,9 +84,8 @@ pub struct MotorPid {
 
 impl MotorPid {
     pub fn new(setpoint_cps: f32, min_duty: u16, max_duty: u16) -> Self {
-        let mut pid = Pid::new(setpoint_cps, 1.0);
-        // Conservative defaults. Tune these for your mechanical system.
-        pid.p(0.0004, 1.0).i(0.00002, 1.0).d(0.0, 1.0);
+        let mut pid = Pid::new(setpoint_cps, 1.0_f32);
+        pid.p(0.0004_f32, 1.0_f32).i(0.00002_f32, 1.0_f32).d(0.0_f32, 1.0_f32);
 
         Self {
             pid,
@@ -116,4 +113,3 @@ impl MotorPid {
         MotorCommand { drive, duty }
     }
 }
-

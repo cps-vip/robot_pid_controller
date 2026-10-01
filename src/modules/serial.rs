@@ -1,35 +1,31 @@
-use embassy_stm32::mode::Blocking;
-use embassy_stm32::usart::{Config, ConfigError, Instance, RxPin, TxPin, Uart};
-use embassy_stm32::Peri;
-use embedded_hal_nb::serial::Read as _;
+use zynq7000_hal::uart::{Rx, Tx};
 
-/// Minimal bidirectional serial interface (blocking write + nonblocking read).
-pub struct SerialInterface<'d> {
-    uart: Uart<'d, Blocking>,
+/// Minimal bidirectional serial interface for Zynq-7000 UART
+pub struct SerialInterface {
+    tx: Tx,
+    rx: Rx,
 }
 
-impl<'d> SerialInterface<'d> {
-    pub fn new<T: Instance>(
-        peri: Peri<'d, T>,
-        rx: Peri<'d, impl RxPin<T>>,
-        tx: Peri<'d, impl TxPin<T>>,
-        config: Config,
-    ) -> Result<Self, ConfigError> {
-        let uart = Uart::new_blocking(peri, rx, tx, config)?;
-        Ok(Self { uart })
+impl SerialInterface {
+    pub fn new(tx: Tx, rx: Rx) -> Self {
+        Self { tx, rx }
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
-        // Best-effort: if TX errors happen, we keep running the control loop.
-        let _ = self.uart.blocking_write(bytes);
+        for &b in bytes {
+            // Spin until TX FIFO has space
+            while self.tx.write_fifo(b).is_err() {
+                core::hint::spin_loop();
+            }
+        }
     }
 
     /// Read one byte if available.
     pub fn try_read(&mut self) -> Option<u8> {
-        match self.uart.read() {
+        match self.rx.read_fifo() {
             Ok(b) => Some(b),
             Err(nb::Error::WouldBlock) => None,
-            Err(nb::Error::Other(_e)) => None,
+            Err(nb::Error::Other(_)) => None,
         }
     }
 }

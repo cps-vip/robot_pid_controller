@@ -4,39 +4,28 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-defmt = "1.0.1"
-defmt-rtt = "1.0.0"
-embassy-executor = { version = "0.9.1", features = ["arch-cortex-m", "executor-thread", "defmt"] }
-embassy-time     = { version = "0.5.0", features = ["tick-hz-1_000", "defmt"] }
+aarch32-cpu = { version = "0.4", features = ["critical-section-single-core"] }
+zynq7000-rt = "0.4"
+zynq7000 = "0.6"
+zynq7000-hal = { version = "0.2", features = ["time-driver-gtc"] }
 
-embassy-stm32 = { version = "0.4.0", features = ["stm32h723zg", "time-driver-tim2", "exti", "unstable-pac", "defmt"] }
+embassy-executor = { version = "0.10", features = [
+  "platform-cortex-ar",
+  "executor-thread",
+] }
+embassy-time = { version = "0.5", features = ["tick-hz-1_000_000"] }
 
-embedded-hal = "1.0.0"
-embedded-hal-nb = "1.0.0"
-nb = "1.1.0"
-cortex-m = { version = "0.7.6", features = ["critical-section-single-core"]}
-cortex-m-rt  = "0.7.5"
-panic-probe = { version = "1.0.0", features = ["print-defmt"] }
-pid          = "4.0.0"
+pid = "4.0.0"
 critical-section = "1.2.0"
+nb = "1.1.0"
+log = "0.4"
+embedded-io = "0.7"
+panic-halt = "1.0.0"
 
-[dev-dependencies]
-defmt-test = "0.4.0"
-
-# cargo build/run
 [profile.dev]
 codegen-units = 1
 debug = 2
-debug-assertions = true # <-
+debug-assertions = true
 incremental = false
-opt-level = 3 # <-
-overflow-checks = true # <-
-
-# [patch.crates-io]
-# embassy-executor = { git = "https://github.com/embassy-rs/embassy"}
-# embassy-sync = { git = "https://github.com/embassy-rs/embassy"}
-# embassy-time = { git = "https://github.com/embassy-rs/embassy"}
-
-[patch.crates-io]
-# Local patch: allow QEI pins to use pull-ups for open-collector encoders.
-embassy-stm32 = { path = "vendor/embassy-stm32" }
+opt-level = 3
+overflow-checks = true

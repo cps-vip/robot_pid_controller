@@ -1,63 +1,95 @@
 #![no_std]
 #![no_main]
 
-use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::timer::simple_pwm::{PwmPin, SimplePwm};
-use embassy_stm32::{time::khz, Config};
 use embassy_time::{Duration, Instant, Ticker};
-use panic_probe as _;
+use panic_halt as _;
 
-use defmt_rtt as _;
+use zynq7000_hal::{
+    clocks::Clocks,
+    gpio::GpioPins,
+    gtc::GlobalTimerCounter,
+    time::Hertz,
+    uart::{ClockConfig, Config, Uart},
+};
+use zynq7000_rt as _;
 
 mod modules;
+
+const PS_CLOCK_FREQUENCY: Hertz = Hertz::from_raw(33_333_300);
 
 const CONTROL_PERIOD_MS: u64 = 10;
 const TELEMETRY_PERIOD_MS: u64 = 100;
 
 const TARGET_CPS: f32 = 4000.0;
 const MIN_DUTY: u16 = 10_000;
+const MAX_DUTY: u16 = 65_535;
+
+// TODO: [HARDWARE/VIVADO INTEGRATION REMINDER]
+// The AXI addresses below are placeholder offsets in the PL (Programmable Logic) address space (M_AXI_GP0).
+// When your Vivado block design is finalized:
+// 1. Open your Vivado project -> Block Design -> "Address Editor" tab.
+// 2. Note the assigned base addresses for your motor PWM IP core (e.g. AXI Timer / custom PWM)
+//    and encoder counter IP core (e.g. AXI Quadrature Encoder / custom counter).
+// 3. Update the base addresses and channel offsets below to match the memory map:
+//    - Left/Right Encoder counter registers
+//    - Left/Right H-Bridge Forward/Reverse duty cycle registers
+pub const AXI_ENCODER_LEFT_ADDR: *const u32 = 0x4000_0000 as *const u32;
+pub const AXI_ENCODER_RIGHT_ADDR: *const u32 = 0x4000_0004 as *const u32;
+
+pub const AXI_PWM_LEFT_FWD_ADDR: *mut u32 = 0x4000_0010 as *mut u32;
+pub const AXI_PWM_LEFT_REV_ADDR: *mut u32 = 0x4000_0014 as *mut u32;
+pub const AXI_PWM_RIGHT_FWD_ADDR: *mut u32 = 0x4000_0018 as *mut u32;
+pub const AXI_PWM_RIGHT_REV_ADDR: *mut u32 = 0x4000_001C as *mut u32;
+
+/// Entry point which calls the embassy main method on Zynq-7000 Cortex-A9.
+#[zynq7000_rt::entry]
+fn entry_point() -> ! {
+    main();
+}
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
-    let p = embassy_stm32::init(Config::default());
+async fn main(_spawner: Spawner) -> ! {
+    let periphs = zynq7000_hal::init(zynq7000_hal::Config::default()).unwrap();
+    let clocks = Clocks::new_from_regs(PS_CLOCK_FREQUENCY).unwrap();
+    let gpio_pins = GpioPins::new(periphs.gpio);
 
-    // QEI encoders (TIM3: PA6=CH1, PC7=CH2 for left; TIM1: PE9=CH1, PE11=CH2 for right)
-    let mut enc_left = modules::encoder::EncoderQei::new(p.TIM3, p.PA6, p.PC7);
-    let mut enc_right = modules::encoder::EncoderQei::new(p.TIM1, p.PE9, p.PE11);
+    // Set up global timer counter and embassy time driver (GTC).
+    let gtc = GlobalTimerCounter::new(periphs.gtc, clocks.arm_clocks());
+    zynq7000_hal::time_driver_gtc::init(clocks.arm_clocks(), gtc);
 
-    // Serial TX for simple telemetry. May need adjust USART/pin/baud
-    let mut uart_cfg = embassy_stm32::usart::Config::default();
-    uart_cfg.baudrate = 115_200;
-    let mut serial = modules::serial::SerialInterface::new(p.USART1, p.PB7, p.PB6, uart_cfg).unwrap();
+    // QEI encoders (memory-mapped registers from FPGA logic)
+    let mut enc_left = unsafe { modules::encoder::Encoder::new(AXI_ENCODER_LEFT_ADDR) };
+    let mut enc_right = unsafe { modules::encoder::Encoder::new(AXI_ENCODER_RIGHT_ADDR) };
 
-    // left motor PWM (TIM4: PD12=CH1 forward, PD13=CH2 reverse)
-    let left_ch1_pin = PwmPin::new(p.PD12, embassy_stm32::gpio::OutputType::PushPull);
-    let left_ch2_pin = PwmPin::new(p.PD13, embassy_stm32::gpio::OutputType::PushPull);
-    let left_pwm = SimplePwm::new(
-        p.TIM4,
-        Some(left_ch1_pin),
-        Some(left_ch2_pin),
-        None,
-        None,
-        khz(1),
-        embassy_stm32::timer::low_level::CountingMode::EdgeAlignedUp,
-    );
-    let mut left_hbridge = modules::motor_control::HBridgePwm::new(left_pwm);
+    // Setup UART (UART1 on MIO 48/49, typical console on Zynq boards)
+    let uart_clk_config = ClockConfig::new_autocalc_with_error(clocks.io_clocks(), 115_200)
+        .unwrap()
+        .0;
+    let uart = Uart::new_with_mio_for_uart_1(
+        periphs.uart_1,
+        Config::new_with_clk_config(uart_clk_config),
+        (gpio_pins.mio.mio48, gpio_pins.mio.mio49),
+    )
+    .unwrap();
+    let (tx, rx) = uart.split();
+    let mut serial = modules::serial::SerialInterface::new(tx, rx);
 
-    // right motor PWM (TIM23: PF0=CH1 forward, PF1=CH2 reverse)
-    let right_ch1_pin = PwmPin::new(p.PF0, embassy_stm32::gpio::OutputType::PushPull);
-    let right_ch2_pin = PwmPin::new(p.PF1, embassy_stm32::gpio::OutputType::PushPull);
-    let right_pwm = SimplePwm::new(
-        p.TIM23,
-        Some(right_ch1_pin),
-        Some(right_ch2_pin),
-        None,
-        None,
-        khz(1),
-        embassy_stm32::timer::low_level::CountingMode::EdgeAlignedUp,
-    );
-    let mut right_hbridge = modules::motor_control::HBridgePwm::new(right_pwm);
+    // Left and Right motor PWM H-Bridges
+    let mut left_hbridge = unsafe {
+        modules::motor_control::HBridgePwm::new(
+            AXI_PWM_LEFT_FWD_ADDR,
+            AXI_PWM_LEFT_REV_ADDR,
+            MAX_DUTY,
+        )
+    };
+    let mut right_hbridge = unsafe {
+        modules::motor_control::HBridgePwm::new(
+            AXI_PWM_RIGHT_FWD_ADDR,
+            AXI_PWM_RIGHT_REV_ADDR,
+            MAX_DUTY,
+        )
+    };
 
     let mut left_pid =
         modules::motor_control::MotorPid::new(TARGET_CPS, MIN_DUTY, left_hbridge.max_duty());
@@ -72,7 +104,7 @@ async fn main(_spawner: Spawner) {
     loop {
         tick.next().await;
 
-        // apply any pending setpoint updates from UART
+        // Apply any pending setpoint updates from UART
         while let Some(b) = serial.try_read() {
             if let Some(cmd) = line.push(b) {
                 match cmd {
@@ -86,7 +118,7 @@ async fn main(_spawner: Spawner) {
             }
         }
 
-        // convert delta counts per period into counts per second
+        // Convert delta counts per period into counts per second
         let left_cps = (enc_left.delta_counts() as f32) / dt_s;
         let right_cps = (enc_right.delta_counts() as f32) / dt_s;
 
@@ -99,7 +131,6 @@ async fn main(_spawner: Spawner) {
 
         if Instant::now() >= next_telemetry {
             next_telemetry += Duration::from_millis(TELEMETRY_PERIOD_MS);
-            info!("cps L={} R={}", left_cps, right_cps);
 
             let mut buf = [0u8; 64];
             let n = build_telemetry_line(&mut buf, left_cps as i32, right_cps as i32);
@@ -248,33 +279,32 @@ fn split_once_space(s: &[u8]) -> (&[u8], &[u8]) {
 }
 
 fn parse_i32(s: &[u8]) -> Option<i32> {
-    let s = trim_ascii(s);
     if s.is_empty() {
         return None;
     }
 
-    let mut i = 0usize;
-    let mut neg = false;
-    if s[0] == b'-' {
-        neg = true;
-        i = 1;
-    } else if s[0] == b'+' {
-        i = 1;
-    }
+    let (neg, s) = match s[0] {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
+    };
 
-    if i >= s.len() {
+    if s.is_empty() {
         return None;
     }
 
-    let mut acc: i32 = 0;
-    while i < s.len() {
-        let b = s[i];
-        if !(b'0'..=b'9').contains(&b) {
+    let mut val: i32 = 0;
+    for &b in s {
+        if !b.is_ascii_digit() {
             return None;
         }
-        acc = acc.saturating_mul(10).saturating_add((b - b'0') as i32);
-        i += 1;
+        let digit = (b - b'0') as i32;
+        val = val.checked_mul(10)?.checked_add(digit)?;
     }
 
-    Some(if neg { -acc } else { acc })
+    if neg {
+        Some(-val)
+    } else {
+        Some(val)
+    }
 }
