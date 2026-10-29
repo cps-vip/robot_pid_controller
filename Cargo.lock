@@ -726,7 +726,6 @@ dependencies = [
  "nb 1.1.0",
  "panic-halt",
  "pid",
- "zynq7000 0.6.0",
  "zynq7000-hal",
  "zynq7000-rt",
 ]
@@ -983,21 +982,6 @@ name = "zynq7000"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9455a2e038e49ffe98032d7a182f1ae28ce272e8664c9f6ced4c75d5c3c88f1"
-dependencies = [
- "arbitrary-int 2.2.0",
- "bitbybit 2.0.1",
- "derive-mmio 0.8.0",
- "once_cell",
- "rustversion",
- "static_assertions",
- "thiserror",
-]
-
-[[package]]
-name = "zynq7000"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7743bcee69542c41ed2f48fd36ceada825baf6ac9dfac768de651ec5602d0439"
 dependencies = [
  "arbitrary-int 2.2.0",
  "bitbybit 2.0.1",

@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 aarch32-cpu = { version = "0.4", features = ["critical-section-single-core"] }
 zynq7000-rt = "0.4"
-zynq7000 = "0.6"
 zynq7000-hal = { version = "0.2", features = ["time-driver-gtc"] }
 
 embassy-executor = { version = "0.10", features = [

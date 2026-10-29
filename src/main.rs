@@ -6,9 +6,14 @@ use embassy_time::{Duration, Instant, Ticker};
 use panic_halt as _;
 
 use zynq7000_hal::{
-    clocks::Clocks,
+    Slcr,
+    clocks::{
+        Clocks,
+        fpga::{self, FpgaClockConfig},
+    },
     gpio::GpioPins,
     gtc::GlobalTimerCounter,
+    pl,
     time::Hertz,
     uart::{ClockConfig, Config, Uart},
 };
@@ -16,7 +21,10 @@ use zynq7000_rt as _;
 
 mod modules;
 
-const PS_CLOCK_FREQUENCY: Hertz = Hertz::from_raw(33_333_300);
+// PYNQ-Z2 onboard PS reference crystal oscillator is 50 MHz (PCW_CRYSTAL_PERIPHERAL_FREQMHZ = 50).
+const PS_CLOCK_FREQUENCY: Hertz = Hertz::from_raw(50_000_000);
+// PYNQ-Z2 PL master fabric clock (FCLK_CLK0..3 sourced from IO PLL) is 100 MHz.
+const PL_MASTER_CLOCK_FREQUENCY: Hertz = Hertz::from_raw(100_000_000);
 
 const CONTROL_PERIOD_MS: u64 = 10;
 const TELEMETRY_PERIOD_MS: u64 = 100;
@@ -50,7 +58,24 @@ fn entry_point() -> ! {
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) -> ! {
-    let periphs = zynq7000_hal::init(zynq7000_hal::Config::default()).unwrap();
+    // Initialize MMU, L2 cache, GIC, and PS-to-PL level shifters while keeping PL in reset
+    // until the 100 MHz FPGA fabric clocks (FCLK0..3) are configured.
+    let mut hal_config = zynq7000_hal::Config::default();
+    hal_config.deassert_pl_reset = false;
+    let periphs = zynq7000_hal::init(hal_config).unwrap();
+
+    // Hold PL in reset while configuring FCLK0..3 to 100 MHz, then release PL reset
+    // so AXI MMIO peripherals in the FPGA fabric have an active clock before any access.
+    pl::assert_reset();
+    let fpga_clk_cfg =
+        FpgaClockConfig::calculate(PS_CLOCK_FREQUENCY, [PL_MASTER_CLOCK_FREQUENCY; 4]).unwrap();
+    unsafe {
+        Slcr::with(|_| {
+            fpga::configure(fpga_clk_cfg);
+        });
+    }
+    pl::deassert_reset();
+
     let clocks = Clocks::new_from_regs(PS_CLOCK_FREQUENCY).unwrap();
     let gpio_pins = GpioPins::new(periphs.gpio);
 
@@ -62,14 +87,14 @@ async fn main(_spawner: Spawner) -> ! {
     let mut enc_left = unsafe { modules::encoder::Encoder::new(AXI_ENCODER_LEFT_ADDR) };
     let mut enc_right = unsafe { modules::encoder::Encoder::new(AXI_ENCODER_RIGHT_ADDR) };
 
-    // Setup UART (UART1 on MIO 48/49, typical console on Zynq boards)
+    // Setup UART0 on MIO 15 (TX) and MIO 14 (RX), wired to the onboard FTDI USB-UART on PYNQ-Z2.
     let uart_clk_config = ClockConfig::new_autocalc_with_error(clocks.io_clocks(), 115_200)
         .unwrap()
         .0;
-    let uart = Uart::new_with_mio_for_uart_1(
-        periphs.uart_1,
+    let uart = Uart::new_with_mio_for_uart_0(
+        periphs.uart_0,
         Config::new_with_clk_config(uart_clk_config),
-        (gpio_pins.mio.mio48, gpio_pins.mio.mio49),
+        (gpio_pins.mio.mio15, gpio_pins.mio.mio14),
     )
     .unwrap();
     let (tx, rx) = uart.split();
